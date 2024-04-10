@@ -36,9 +36,12 @@ from diffusers.utils import (
     unscale_lora_layers,
 )
 from diffusers.utils.torch_utils import randn_tensor
-from diffusers.pipeline_utils import DiffusionPipeline, StableDiffusionMixin
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from diffusers.pipelines.stable_diffusion.pipeline_output import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
+
+from .consistory_models.attention_processor import AttentionMappedAttnProcessor
+from .consistory_models.unet import SDUNet2DConditionModel
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -116,7 +119,7 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-class StableDiffusionPipeline(
+class StableDiffusionConsistoryPipeline(
     DiffusionPipeline,
     StableDiffusionMixin,
     TextualInversionLoaderMixin,
@@ -161,13 +164,16 @@ class StableDiffusionPipeline(
     _optional_components = ["safety_checker", "feature_extractor", "image_encoder"]
     _exclude_from_cpu_offload = ["safety_checker"]
     _callback_tensor_inputs = ["latents", "prompt_embeds", "negative_prompt_embeds"]
+    
+    default_attention_map_factors = [2, 4] # [1, 2, 4, 8, 16, 32]
 
     def __init__(
         self,
         vae: AutoencoderKL,
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
-        unet: UNet2DConditionModel,
+        # unet: UNet2DConditionModel,
+        unet: SDUNet2DConditionModel,
         scheduler: KarrasDiffusionSchedulers,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
@@ -253,6 +259,7 @@ class StableDiffusionPipeline(
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.register_to_config(requires_safety_checker=requires_safety_checker)
+        self.load_attention_map_module()
 
     def _encode_prompt(
         self,
@@ -758,6 +765,12 @@ class StableDiffusionPipeline(
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        # consistory
+        keywords: List[str] = None,
+        reference_images: torch.FloatTensor = None,
+        reference_beta: float = None,
+        # controlnet
+        # ...
         **kwargs,
     ):
         r"""
@@ -864,6 +877,7 @@ class StableDiffusionPipeline(
         # to deal with lora scaling and other possible forward hooks
 
         # 1. Check inputs. Raise error if not correct
+        # 看起来没什么要改的
         self.check_inputs(
             prompt,
             height,
@@ -883,6 +897,9 @@ class StableDiffusionPipeline(
         self._cross_attention_kwargs = cross_attention_kwargs
         self._interrupt = False
 
+        from songmisc.utils import color_print as print
+        # batchsize 这里看看在 batch 内 ref 时如何共享  #TODO
+
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
@@ -890,6 +907,13 @@ class StableDiffusionPipeline(
             batch_size = len(prompt)
         else:
             batch_size = prompt_embeds.shape[0]
+
+        # 后面写好了再打开，不然 shape 不对
+        # if reference_images is None:
+        #     batch_size += 1  # 如果有多张 ref image 呢？
+
+
+        print(f"consistory batch size: {batch_size}")
 
         device = self._execution_device
 
@@ -1034,3 +1058,22 @@ class StableDiffusionPipeline(
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+    
+    def get_current_keywords(self):
+        return self.current_keywords
+    
+    def get_current_prompt(self):
+        return self.current_prompt
+
+    def get_current_negative_prompt(self):
+        return self.current_negative_prompt
+    
+    def load_attention_map_module(self):
+        self.processor = AttentionMappedAttnProcessor(
+            self.unet.attention_map, 
+            tokenizer=self.tokenizer, 
+            factors=StableDiffusionConsistoryPipeline.default_attention_map_factors,
+            get_keywords_func=lambda: self.get_current_keywords(), 
+            get_prompt_func=lambda: self.get_current_prompt(), 
+            get_negative_prompt_func=lambda: self.get_current_negative_prompt())
+        self.unet.set_attn_processor(self.processor)
