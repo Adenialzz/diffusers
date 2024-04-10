@@ -1,4 +1,4 @@
-# adapted init from https://github.com/hugggingface/diffusers/blob/main/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py
+# adapted  init from https://github.com/hugggingface/diffusers/blob/main/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py
 
 # Copyright 2024 The HuggingFace Team. All rights reserved.
 #
